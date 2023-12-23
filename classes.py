@@ -112,12 +112,15 @@ class PortfolioManager:
             )
             self.assets.append(new_asset)
 
-    def _grow_investments_and_assets(self):
+    def _grow_investments_and_assets(self, years_from_start, current_month):
         self.retirement_investment.grow()
         self.giving_investment.grow()
-        for asset in self.assets:
-            asset.grow()
         self.asset_savings.grow()
+        # only update assets once / year (to replicate rent not rising every month)
+        if current_month == 12:
+            for asset in self.assets:
+                # have to now account for the whole year
+                assets.grow(years_from_start)
 
     def _get_tax_return(self):
         sum_taxes = sum(self.taxes_ytd_ia.values())
@@ -252,30 +255,49 @@ class Salary:
 
 
 class Asset:
+    # per chatGPT : all are percentages of house value except vacancy rate
+    vacancy_rate = 0.0833  # 5-10%, this represents 1 month / year
+    insurance = 0.0035
+    taxes = 0.00730  # https://smartasset.com/taxes/tennessee-property-tax-calculator
+    maintenance = 0.01
+
     def __init__(
-        self, name, value, growth_rate, dividend_rate=None, dividend_frequency=None
+        self,
+        name,
+        value,
+        growth_rate,
+        years_from_start,
+        dividend_rate=None,
     ):
         self.name = name
         self.value = value
-        self.growth_rate = growth_rate / 12
+        self.growth_rate = growth_rate  # annual growth rate
         self.dividend_rate = dividend_rate
-        self.dividend_frequency = dividend_frequency
-        self.df = pd.DataFrame({"Value": [], "Total": [], "years_from_start": []})
+        # now subtract out expenses to estimate actual profitability
+        self.profit_dividend_rate = (1 - self.vacancy_rate) * dividend_rate - (
+            self.insurance + self.taxes + self.maintenance
+        ) / 12  # (these last 3 are annualized)
+        self.df = pd.DataFrame(
+            {"Value": [value], "years_from_start": [years_from_start]}
+        )
 
     def grow(self, years_from_start):
-        new_row = pd.DataFrame(
-            {
-                "Value": [self.value * self.growth_rate],
-                "years_from_start": [years_from_start],
-            }
-        )
-        self.df = self.df.append(new_row)
-        self.value *= self.growth_rate
+        most_recent_growth = self.df["years_from_start"].max()
+        if years_from_start >= (most_recent_growth + 1):
+            new_value = round(self.value * (1 + self.growth_rate), 2)
+            new_row = pd.DataFrame(
+                {
+                    "Value": [new_value],
+                    "years_from_start": [years_from_start],
+                }
+            )
+            self.df = pd.concat([self.df, new_row], ignore_index=True)
+            self.value = new_value
 
     def pay_dividend(self):
-        if self.dividend_rate is None or self.dividend_frequency is None:
+        if self.dividend_rate is None:
             raise ValueError("Dividend rate or frequency not set")
-        return self.dividend_rate * self.value
+        return round(self.profit_dividend_rate * self.value, 2)
 
 
 class Investment:
