@@ -69,7 +69,7 @@ class PortfolioManager:
             tax_return = self._get_tax_return()
             total_income += tax_return
 
-        self.income_ytd[current_month] = ia_income
+        self.income_ytd[current_month] = total_income
         return total_income * (1 - tax_rate)
 
     def _manage_income(self, income, years_from_start):
@@ -117,7 +117,7 @@ class PortfolioManager:
         else:
             self._purchase_assets(n_assets, asset_price)
 
-    def _purchase_assets(self, n_assets, asset_price):
+    def _purchase_assets(self, n_assets, asset_price, disp_invest, years_from_start):
         for i in range(n_assets):
             current_assets = len(self.assets)
             new_asset_name = f"Asset {current_assets+i}+1"
@@ -127,8 +127,16 @@ class PortfolioManager:
                 value=asset_price,
                 growth_rate=0.036,
                 dividend_rate=0.01,
+                years_from_start=years_from_start,
             )
             self.assets.append(new_asset)
+            if disp_invest >= asset_price:
+                disp_invest -= asset_price
+            else:
+                # take the remainder from the asset_savings
+                self.asset_savings.withdraw_accounting_for_taxes(
+                    asset_price - disp_invest, years_from_start
+                )
             raise ValueError("Need to remove from investments still")
 
     def _grow_investments_and_assets(self, years_from_start, current_month):
@@ -149,6 +157,7 @@ class PortfolioManager:
         self.tax_cal.reset_year()
         self.taxes_ytd_ia = {}
         self.salary.get_raise(1.05)
+        self.income_ytd = {}
 
     def init_retirement_savings(self, amount):
         self.retirement_investment.add(amount, 0)
@@ -170,9 +179,9 @@ class PortfolioManager:
         self._grow_investments_and_assets(years_from_start, current_month)
         # close out year
         if current_month == 12:
-            self._close_out_year()
             # update df
             self._update_df(years_from_start)
+            self._close_out_year()
 
     def _update_df(self, years_from_start):
         new_row = pd.DataFrame(
@@ -187,6 +196,7 @@ class PortfolioManager:
             }
         )
         self.df = pd.concat([self.df, new_row], ignore_index=True)
+        self.df = self.df.round(2)
 
 
 class SpendingStrategy:
