@@ -57,7 +57,7 @@ class PortfolioManager:
         n_years = int(years_from_start)
         ia_income = round(self.ia.reverse_adjust(total_income, n_years), 2)
         fraction = years_from_start % 1
-        current_month = int(fraction * 12)
+        current_month = int(fraction * 12) + 1
 
         self.tax_cal.add_inflation_adjusted_income(ia_income, current_month)
         tax_rate = self.tax_cal.get_tax_rate(current_month)
@@ -70,7 +70,6 @@ class PortfolioManager:
             total_income += tax_return
 
         self.income_ytd[current_month] = ia_income
-
         return total_income * (1 - tax_rate)
 
     def _manage_income(self, income, years_from_start):
@@ -130,6 +129,7 @@ class PortfolioManager:
                 dividend_rate=0.01,
             )
             self.assets.append(new_asset)
+            raise ValueError("Need to remove from investments still")
 
     def _grow_investments_and_assets(self, years_from_start, current_month):
         self.retirement_investment.grow(years_from_start)
@@ -148,6 +148,7 @@ class PortfolioManager:
     def _close_out_year(self):
         self.tax_cal.reset_year()
         self.taxes_ytd_ia = {}
+        self.salary.get_raise(1.05)
 
     def init_retirement_savings(self, amount):
         self.retirement_investment.add(amount, 0)
@@ -158,13 +159,14 @@ class PortfolioManager:
         self.df.iloc[0, self.df.columns.get_loc("Giving Savings")] = amount
 
     def simulate_month(self, years_from_start):
+        fraction = years_from_start % 1
+        current_month = int(fraction * 12) + 1
         # get paid
         income = self._get_paid(years_from_start)
         # manage income
         self._manage_income(income, years_from_start)
         # grow investments
-        fraction = years_from_start % 1
-        current_month = int(fraction * 12)
+
         self._grow_investments_and_assets(years_from_start, current_month)
         # close out year
         if current_month == 12:
@@ -278,7 +280,7 @@ class TaxCalculator:
 
     def get_tax_return(self, total_taxes_paid: float):
         tax_rate = self.get_tax_rate(current_month=12)
-        total_taxes = self.projected_inflation_adjusted_income * tax_rate
+        total_taxes = self.projected_inflation_adjusted_income[12] * tax_rate
         return total_taxes_paid - total_taxes
 
 
