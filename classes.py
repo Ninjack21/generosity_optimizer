@@ -29,11 +29,24 @@ class PortfolioManager:
         self.ia = InflationAdjuster(0.04)
         self.tax_cal = TaxCalculator()
         self.taxes_ytd_ia = {}
-        # NOTE: a 0.096 growth rate (compounded monthly) is equivalent to 1.15 growth rate (compounded annually)
+        self.income_ytd = {}
+        # NOTE: a 0.096 growth rate (compounded monthly) is equivalent to 10% growth rate (compounded annually)
         self.retirement_investment = Investment("Retirement", 0.096, tax_free=True)
         self.giving_investment = Investment("Giving", 0.096)
+        self.giving_tracker = SpendingTracker()
         self.assets = []
         self.asset_savings = Investment("Asset Savings", 0.096)
+        self.df = pd.DataFrame(
+            {
+                "Salary": [salary.salary],
+                "Total Income": [salary.salary],
+                "Retirement Savings": [0],
+                "Giving Savings": [0],
+                "Asset Savings": [0],
+                "years_from_start": [0],
+                "Total Giving": [0],
+            }
+        )
 
     def _get_paid(self, years_from_start: float):
         salary_paycheck = round(self.salary.get_paid(), 2)
@@ -56,6 +69,8 @@ class PortfolioManager:
             tax_return = self._get_tax_return()
             total_income += tax_return
 
+        self.income_ytd[current_month] = ia_income
+
         return total_income * (1 - tax_rate)
 
     def _manage_income(self, income, years_from_start):
@@ -70,9 +85,11 @@ class PortfolioManager:
         # -----------handle giving-----------
         spend_give, invest_give = self.genstrat.straight_invest(disp_give)
         draw_down_rate = self.genstrat.investment_draw_down_rate
-        withdrawal = self.genstrat.total * draw_down_rate
+        withdrawal = self.giving_investment.total * draw_down_rate
 
-        self.giving_investment.withdraw(withdrawal, years_from_start)
+        self.giving_investment.withdraw_accounting_for_taxes(
+            withdrawal, years_from_start
+        )
         self.giving_investment.add(invest_give, years_from_start)
 
         self.giving_tracker.add(spend_give, years_from_start)
@@ -90,7 +107,9 @@ class PortfolioManager:
 
         if self.asset_savings.test_sufficient_funds(asset_price - disp_invest):
             # purchase asset
-            self.asset_savings.withdraw(asset_price - disp_invest, years_from_start)
+            self.asset_savings.withdraw_accounting_for_taxes(
+                asset_price - disp_invest, years_from_start
+            )
             n_assets += 1
 
         if n_assets == 0:
@@ -113,9 +132,9 @@ class PortfolioManager:
             self.assets.append(new_asset)
 
     def _grow_investments_and_assets(self, years_from_start, current_month):
-        self.retirement_investment.grow()
-        self.giving_investment.grow()
-        self.asset_savings.grow()
+        self.retirement_investment.grow(years_from_start)
+        self.giving_investment.grow(years_from_start)
+        self.asset_savings.grow(years_from_start)
         # only update assets once / year (to replicate rent not rising every month)
         if current_month == 12:
             for asset in self.assets:
@@ -129,6 +148,43 @@ class PortfolioManager:
     def _close_out_year(self):
         self.tax_cal.reset_year()
         self.taxes_ytd_ia = {}
+
+    def init_retirement_savings(self, amount):
+        self.retirement_investment.add(amount, 0)
+        self.df.iloc[0, self.df.columns.get_loc("Retirement Savings")] = amount
+
+    def init_giving_savings(self, amount):
+        self.giving_investment.add(amount, 0)
+        self.df.iloc[0, self.df.columns.get_loc("Giving Savings")] = amount
+
+    def simulate_month(self, years_from_start):
+        # get paid
+        income = self._get_paid(years_from_start)
+        # manage income
+        self._manage_income(income, years_from_start)
+        # grow investments
+        fraction = years_from_start % 1
+        current_month = int(fraction * 12)
+        self._grow_investments_and_assets(years_from_start, current_month)
+        # close out year
+        if current_month == 12:
+            self._close_out_year()
+            # update df
+            self._update_df(years_from_start)
+
+    def _update_df(self, years_from_start):
+        new_row = pd.DataFrame(
+            {
+                "Salary": [self.salary.salary],
+                "Total Income": [sum(self.income_ytd.values())],
+                "Retirement Savings": [self.retirement_investment.total],
+                "Giving Savings": [self.giving_investment.total],
+                "Asset Savings": [self.asset_savings.total],
+                "years_from_start": [years_from_start],
+                "Total Giving": [self.giving_tracker.total],
+            }
+        )
+        self.df = pd.concat([self.df, new_row], ignore_index=True)
 
 
 class SpendingStrategy:
@@ -165,7 +221,7 @@ class GenerosityStrategy:
     ):
         self.straight_percent = straight_percent
         self.investment_percent = 1 - straight_percent
-        self.investment_draw_down_rate = investment_draw_down_rate
+        self.investment_draw_down_rate = investment_draw_down_rate / 12
         self.legacy_give_percent = legacy_give_percent
 
     def straight_invest(self, paycheck):
@@ -206,7 +262,7 @@ class TaxCalculator:
         self.year_to_date[current_month] = ia_income
         sum_income = sum(self.year_to_date.values())
         self.projected_inflation_adjusted_income[current_month] = (
-            sum_income / (current_month / 12) - 25000  # standard deduction
+            sum_income / (current_month / 12) - 29200  # standard deduction
         )
 
     def get_tax_rate(self, current_month):
@@ -232,15 +288,15 @@ class SpendingTracker:
         self.total = 0
 
     def add(self, amount, years_from_start):
+        self.total += amount
         new_row = pd.DataFrame(
             {
                 "Spending": [amount],
-                "Total": [self.total + amount],
+                "Total": [self.total],
                 "years_from_start": [years_from_start],
             }
         )
-        self.df = self.df.append(new_row)
-        self.total += amount
+        self.df = pd.concat([self.df, new_row], ignore_index=True)
 
 
 class Salary:
@@ -397,6 +453,9 @@ class Investment:
         else:
             tax_rate = gains_rate
 
-        return amount <= self.nstocks * (
-            (1 - tax_rate) * self.stock_cost + tax_rate * self.cost_basis
-        )
+        if self.cost_basis == None:
+            return False
+        else:
+            return amount <= self.nstocks * (
+                (1 - tax_rate) * self.stock_cost + tax_rate * self.cost_basis
+            )
