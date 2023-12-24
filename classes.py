@@ -19,57 +19,76 @@ class Person:
 class PortfolioManager:
     def __init__(
         self,
+        person_age,
         spendstrat,
         genstrat,
         salary,
     ):
+        self.person_age = person_age
         self.spendstrat = spendstrat
         self.genstrat = genstrat
         self.salary = salary
         self.ia = InflationAdjuster(0.04)
         self.tax_cal = TaxCalculator()
         self.taxes_ytd_ia = {}
-        self.income_ytd = {}
+        self.income_ytd_ia = {}
+        self.giving_ytd_ia = {}
         # NOTE: a 0.096 growth rate (compounded monthly) is equivalent to 10% growth rate (compounded annually)
         self.retirement_investment = Investment("Retirement", 0.096, tax_free=True)
         self.giving_investment = Investment("Giving", 0.096)
-        self.giving_tracker = SpendingTracker()
         self.assets = []
         self.asset_savings = Investment("Asset Savings", 0.096)
         self.df = pd.DataFrame(
             {
-                "Salary": [salary.salary],
-                "Total Income": [salary.salary],
+                "years_from_start": [0],
+                "Age": [person_age],
+                "Salary": [0],
+                "Total Income": [0],
+                "Total Taxes": [0],
+                "Post Tax Income": [0],
                 "Retirement Savings": [0],
                 "Giving Savings": [0],
                 "Asset Savings": [0],
-                "years_from_start": [0],
                 "Total Giving": [0],
+                "Number Assets": [0],
             }
         )
 
     def _get_paid(self, years_from_start: float):
-        salary_paycheck = round(self.salary.get_paid(), 2)
+        salary_paycheck = 0
+        assets_income = 0
+        retirement_income = 0
+        if self.person_age + years_from_start >= 65:
+            retirement_withdrawal = self.retirement_investment.total * (0.07 / 12)
+            self.retirement_investment.withdraw_accounting_for_taxes(
+                retirement_withdrawal, years_from_start
+            )
+            retirement_income = retirement_withdrawal
+        else:
+            salary_paycheck = round(self.salary.get_paid(), 2)
         assets_income = sum([asset.pay_dividend() for asset in self.assets])
+        # if past 65 start drawing down 7% / year retirement savings
 
-        total_income = salary_paycheck + assets_income
+        total_income = salary_paycheck + assets_income + retirement_income
         # adjust for inflation annually instead of monthly, is more intuitive - adjust X years back
         n_years = int(years_from_start)
         ia_income = round(self.ia.reverse_adjust(total_income, n_years), 2)
         fraction = years_from_start % 1
-        current_month = int(fraction * 12) + 1
+
+        current_month = round(fraction * 12) if fraction != 0 else 12
 
         self.tax_cal.add_inflation_adjusted_income(ia_income, current_month)
         tax_rate = self.tax_cal.get_tax_rate(current_month)
 
         self.taxes_ytd_ia[current_month] = ia_income * tax_rate
+        self.income_ytd_ia[current_month] = ia_income
 
         # if 12th month of year, get tax return
         if current_month == 12:
             tax_return = self._get_tax_return()
             total_income += tax_return
+            self.taxes_ytd_ia[current_month] -= tax_return
 
-        self.income_ytd[current_month] = total_income
         return total_income * (1 - tax_rate)
 
     def _manage_income(self, income, years_from_start):
@@ -81,6 +100,9 @@ class PortfolioManager:
             disp_give,
         ) = self.spendstrat.base_retirement_spend_invest_give(income)
 
+        current_month = (
+            round((years_from_start % 1) * 12) if years_from_start % 1 != 0 else 12
+        )
         # -----------handle giving-----------
         spend_give, invest_give = self.genstrat.straight_invest(disp_give)
         draw_down_rate = self.genstrat.investment_draw_down_rate
@@ -91,8 +113,9 @@ class PortfolioManager:
         )
         self.giving_investment.add(invest_give, years_from_start)
 
-        self.giving_tracker.add(spend_give, years_from_start)
-        self.giving_tracker.add(withdrawal, years_from_start)
+        spend_give_ia = self.ia.reverse_adjust(spend_give, years_from_start)
+        withdrawal_ia = self.ia.reverse_adjust(withdrawal, years_from_start)
+        self.giving_ytd_ia[current_month] = spend_give_ia + withdrawal_ia
 
         # -----------handle investing-----------
         self.retirement_investment.add(retirement_saving, years_from_start)
@@ -105,17 +128,15 @@ class PortfolioManager:
             disp_invest -= n_assets * asset_price
 
         if self.asset_savings.test_sufficient_funds(asset_price - disp_invest):
-            # purchase asset
-            self.asset_savings.withdraw_accounting_for_taxes(
-                asset_price - disp_invest, years_from_start
-            )
             n_assets += 1
 
         if n_assets == 0:
             self.asset_savings.add(disp_invest, years_from_start)
 
         else:
-            self._purchase_assets(n_assets, asset_price)
+            self._purchase_assets(
+                n_assets, round(asset_price, 2), round(disp_invest, 2), years_from_start
+            )
 
     def _purchase_assets(self, n_assets, asset_price, disp_invest, years_from_start):
         for i in range(n_assets):
@@ -125,7 +146,7 @@ class PortfolioManager:
             new_asset = Asset(
                 name=new_asset_name,
                 value=asset_price,
-                growth_rate=0.036,
+                growth_rate=0.038,
                 dividend_rate=0.01,
                 years_from_start=years_from_start,
             )
@@ -135,9 +156,8 @@ class PortfolioManager:
             else:
                 # take the remainder from the asset_savings
                 self.asset_savings.withdraw_accounting_for_taxes(
-                    asset_price - disp_invest, years_from_start
+                    round(asset_price - disp_invest, 2), years_from_start
                 )
-            raise ValueError("Need to remove from investments still")
 
     def _grow_investments_and_assets(self, years_from_start, current_month):
         self.retirement_investment.grow(years_from_start)
@@ -147,7 +167,7 @@ class PortfolioManager:
         if current_month == 12:
             for asset in self.assets:
                 # have to now account for the whole year
-                assets.grow(years_from_start)
+                asset.grow(years_from_start)
 
     def _get_tax_return(self):
         sum_taxes = sum(self.taxes_ytd_ia.values())
@@ -157,7 +177,8 @@ class PortfolioManager:
         self.tax_cal.reset_year()
         self.taxes_ytd_ia = {}
         self.salary.get_raise(1.05)
-        self.income_ytd = {}
+        self.income_ytd_ia = {}
+        self.giving_ytd_ia = {}
 
     def init_retirement_savings(self, amount):
         self.retirement_investment.add(amount, 0)
@@ -169,7 +190,7 @@ class PortfolioManager:
 
     def simulate_month(self, years_from_start):
         fraction = years_from_start % 1
-        current_month = int(fraction * 12) + 1
+        current_month = round(fraction * 12) if fraction != 0 else 12
         # get paid
         income = self._get_paid(years_from_start)
         # manage income
@@ -186,13 +207,31 @@ class PortfolioManager:
     def _update_df(self, years_from_start):
         new_row = pd.DataFrame(
             {
-                "Salary": [self.salary.salary],
-                "Total Income": [sum(self.income_ytd.values())],
-                "Retirement Savings": [self.retirement_investment.total],
-                "Giving Savings": [self.giving_investment.total],
-                "Asset Savings": [self.asset_savings.total],
                 "years_from_start": [years_from_start],
-                "Total Giving": [self.giving_tracker.total],
+                "Age": [self.person_age + years_from_start],
+                "Salary": [
+                    self.ia.reverse_adjust(self.salary.salary, years_from_start)
+                ],
+                "Total Income": [sum(self.income_ytd_ia.values())],
+                "Total Taxes": [sum(self.taxes_ytd_ia.values())],
+                "Post Tax Income": [
+                    sum(self.income_ytd_ia.values()) - sum(self.taxes_ytd_ia.values())
+                ],
+                "Retirement Savings": [
+                    self.ia.reverse_adjust(
+                        self.retirement_investment.total, years_from_start
+                    )
+                ],
+                "Giving Savings": [
+                    self.ia.reverse_adjust(
+                        self.giving_investment.total, years_from_start
+                    )
+                ],
+                "Asset Savings": [
+                    self.ia.reverse_adjust(self.asset_savings.total, years_from_start)
+                ],
+                "Total Giving": [sum(self.giving_ytd_ia.values())],
+                "Number Assets": [len(self.assets)],
             }
         )
         self.df = pd.concat([self.df, new_row], ignore_index=True)
@@ -253,11 +292,11 @@ class InflationAdjuster:
 
 class TaxCalculator:
     tax_brackets = {
-        (22001, 89450): 0.12,
-        (89451, 190750): 0.22,
-        (190751, 364200): 0.24,
-        (364201, 462500): 0.32,
-        (462501, 693750): 0.35,
+        (22001, 89450.9999999): 0.12,
+        (89451, 190750.9999999): 0.22,
+        (190751, 364200.9999999): 0.24,
+        (364201, 462500.9999999): 0.32,
+        (462501, 693750.9999999): 0.35,
         (693751, 9999999): 0.37,
     }
     capital_gains = 0.15
